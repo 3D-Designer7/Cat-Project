@@ -161,7 +161,7 @@ app.prepare().then(() => {
           io.emit('queue_status', getQueueStatus());
           break;
         } else {
-          console.log(`[DEBUG] Skipping disconnected partner ${partner.id} in queue ${mode}`);
+          console.log(`[DEBUG] Skipping disconnected partner ${partnerInQueue.id} in queue ${mode}`);
         }
       }
 

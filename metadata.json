@@ -1,0 +1,5 @@
+{
+  "name": "CatChat - Anonymous Chat",
+  "description": "A real-time anonymous chat application that connects random users globally via text, video, and voice.",
+  "requestFramePermissions": ["camera", "microphone"]
+}

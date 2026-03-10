@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --color-accent: #6C63FF;
+}
+
+:root {
+  --background: #F8FAFC;
+  --card: #FFFFFF;
+  --foreground: #111827;
+  --border: #E5E7EB;
+}
+
+.dark {
+  --background: #121212;
+  --card: #1E1E1E;
+  --foreground: #FFFFFF;
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+@layer base {
+  html, body {
+    overflow: hidden;
+    height: 100%;
+    width: 100%;
+    @apply bg-background text-foreground transition-colors duration-300;
+  }
+
+  * {
+    @apply transition-colors duration-300;
+  }
+}
+
+@layer utilities {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

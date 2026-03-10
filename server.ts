@@ -27,7 +27,8 @@ const queues: Record<string, User[]> = {
   voice: [],
 };
 
-const activeUsers = new Map<string, User>();
+const activeUsers = new Map<string, User>(); // socketId -> User
+const userIdToSocketId = new Map<string, string>(); // userId -> socketId
 
 app.prepare().then(() => {
   const server = createServer(async (req, res) => {
@@ -68,11 +69,14 @@ app.prepare().then(() => {
       });
 
       // Remove any existing entry for this userId to handle reconnections
-      for (const [sid, user] of activeUsers.entries()) {
-        if (user.id === userId) {
-          activeUsers.delete(sid);
-          queues[user.mode] = queues[user.mode].filter(u => u.id !== userId);
-        }
+      const oldSocketId = userIdToSocketId.get(userId);
+      if (oldSocketId) {
+        activeUsers.delete(oldSocketId);
+        userIdToSocketId.delete(userId);
+        // Also remove from queues if they were there
+        Object.keys(queues).forEach(m => {
+          queues[m] = queues[m].filter(u => u.id !== userId);
+        });
       }
 
       const newUser: User = {
@@ -86,7 +90,8 @@ app.prepare().then(() => {
       };
 
       activeUsers.set(socket.id, newUser);
-      console.log(`[DEBUG] User added to activeUsers: ${userId} (${username}) for mode: ${mode}`);
+      userIdToSocketId.set(userId, socket.id);
+      console.log(`[DEBUG] User added: ${userId} (${username}) for mode: ${mode}. Socket: ${socket.id}`);
 
       // Broadcast queue status
       const getQueueStatus = () => {
@@ -103,21 +108,26 @@ app.prepare().then(() => {
       console.log(`[DEBUG] Attempting to match ${userId}. Queue length for ${mode}: ${queues[mode].length}`);
       
       while (queues[mode].length > 0) {
-        const partner = queues[mode].shift()!;
-        console.log(`[DEBUG] Checking potential partner: ${partner.id} (Socket: ${partner.socketId})`);
+        const partnerInQueue = queues[mode].shift()!;
+        // Get the partner's *current* socketId
+        const currentPartnerSocketId = userIdToSocketId.get(partnerInQueue.id);
         
-        const partnerSocket = io.sockets.sockets.get(partner.socketId);
-        console.log(`[DEBUG] Partner socket found: ${!!partnerSocket}`);
-        if (partnerSocket) {
-          console.log(`[DEBUG] Partner socket connected: ${partnerSocket.connected}`);
+        if (!currentPartnerSocketId) {
+          console.log(`[DEBUG] Skipping partner ${partnerInQueue.id} - no active socketId`);
+          continue;
         }
 
+        const partnerSocket = io.sockets.sockets.get(currentPartnerSocketId);
+        
         if (partnerSocket && partnerSocket.connected) {
-          console.log(`[DEBUG] Partner ${partner.id} is connected. Finalizing match.`);
+          console.log(`[DEBUG] Partner ${partnerInQueue.id} is connected. Finalizing match.`);
           const roomId = uuidv4();
           
           newUser.status = 'MATCHED';
           newUser.roomId = roomId;
+          
+          // Update partner's status
+          const partner = activeUsers.get(currentPartnerSocketId)!;
           partner.status = 'MATCHED';
           partner.roomId = roomId;
 
@@ -168,6 +178,7 @@ app.prepare().then(() => {
       if (user) {
         queues[user.mode] = queues[user.mode].filter(u => u.socketId !== socket.id);
         activeUsers.delete(socket.id);
+        userIdToSocketId.delete(user.id);
         console.log(`[DEBUG] User removed from queue: ${user.id}`);
       }
     });
@@ -197,6 +208,7 @@ app.prepare().then(() => {
           console.log(`[DEBUG] Match cancelled: User ${user.id} disconnected from room ${user.roomId}`);
         }
         activeUsers.delete(socket.id);
+        userIdToSocketId.delete(user.id);
         console.log(`[DEBUG] User removed from queue/active: ${user.id}`);
       }
       console.log(`[DEBUG] Socket disconnected: ${socket.id}`);

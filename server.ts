@@ -64,7 +64,7 @@ app.prepare().then(() => {
         await redis.del(`userIdToSocketId:${userId}`);
         // Also remove from all queues
         for (const m of ['text', 'video', 'voice']) {
-          await redis.lrem(`queue:${m}`, 0, userId);
+          await redis.lrem(`queue:${m}`, 0, oldSocketId);
         }
       }
 
@@ -78,9 +78,9 @@ app.prepare().then(() => {
         status: 'WAITING',
       };
 
-      await redis.hset(`user:${socket.id}`, newUser as any);
+      await redis.hmset(`user:${socket.id}`, newUser as any);
       await redis.set(`userIdToSocketId:${userId}`, socket.id);
-      await redis.lpush(`queue:${mode}`, userId);
+      await redis.rpush(`queue:${mode}`, socket.id);
       
       console.log(`[DEBUG] User added: ${userId} (${username}) for mode: ${mode}. Socket: ${socket.id}`);
       console.log(`[DEBUG] Queue ${mode} length: ${await redis.llen(`queue:${mode}`)}`);
@@ -89,47 +89,43 @@ app.prepare().then(() => {
       let matched = false;
       
       while ((await redis.llen(`queue:${mode}`)) >= 2) {
-        const partnerId = await redis.rpop(`queue:${mode}`);
-        if (!partnerId || partnerId === userId) {
-          if (partnerId === userId) await redis.lpush(`queue:${mode}`, partnerId);
+        const partnerSocketId = await redis.lpop(`queue:${mode}`);
+        if (!partnerSocketId || partnerSocketId === socket.id) {
+          if (partnerSocketId === socket.id) await redis.rpush(`queue:${mode}`, partnerSocketId);
           continue;
         }
         
-        const currentPartnerSocketId = await redis.get(`userIdToSocketId:${partnerId}`);
-        if (!currentPartnerSocketId) {
-          console.log(`[DEBUG] Skipping partner ${partnerId} - no active socketId`);
-          continue;
-        }
-
-        const partnerSocket = io.sockets.sockets.get(currentPartnerSocketId);
+        const partnerSocket = io.sockets.sockets.get(partnerSocketId);
         
         if (partnerSocket && partnerSocket.connected) {
-          console.log(`[DEBUG] Partner ${partnerId} is connected. Finalizing match.`);
+          console.log(`[DEBUG] Partner ${partnerSocketId} is connected. Finalizing match.`);
           const roomId = uuidv4();
           
           // Update statuses
-          await redis.hset(`user:${socket.id}`, { status: 'MATCHED', roomId } as any);
-          await redis.hset(`user:${currentPartnerSocketId}`, { status: 'MATCHED', roomId } as any);
+          await redis.hmset(`user:${socket.id}`, { status: 'MATCHED', roomId } as any);
+          await redis.hmset(`user:${partnerSocketId}`, { status: 'MATCHED', roomId } as any);
 
-          console.log(`[DEBUG] Match created: ${userId} <-> ${partnerId} in room: ${roomId}`);
+          console.log(`[DEBUG] Match created: ${socket.id} <-> ${partnerSocketId} in room: ${roomId}`);
 
           // Join rooms
           socket.join(roomId);
           partnerSocket.join(roomId);
           
           // Emit match_found to both
+          const partnerData = await redis.hgetall(`user:${partnerSocketId}`);
           socket.emit('match_found', {
             roomId,
-            partnerId: partnerId,
-            partnerName: (await redis.hgetall(`user:${currentPartnerSocketId}`)).username,
-            partnerCountry: (await redis.hgetall(`user:${currentPartnerSocketId}`)).country,
-            partnerGender: (await redis.hgetall(`user:${currentPartnerSocketId}`)).gender,
+            partnerId: partnerData.id,
+            partnerName: partnerData.username,
+            partnerCountry: partnerData.country,
+            partnerGender: partnerData.gender,
             isInitiator: true
           });
 
+          const userData = await redis.hgetall(`user:${socket.id}`);
           partnerSocket.emit('match_found', {
             roomId,
-            partnerId: userId,
+            partnerId: userData.id,
             partnerName: username,
             partnerCountry: country,
             partnerGender: gender,
@@ -139,7 +135,7 @@ app.prepare().then(() => {
           matched = true;
           break;
         } else {
-          console.log(`[DEBUG] Skipping disconnected partner ${partnerId} in queue ${mode}`);
+          console.log(`[DEBUG] Skipping disconnected partner ${partnerSocketId} in queue ${mode}`);
         }
       }
     });
@@ -150,7 +146,7 @@ app.prepare().then(() => {
       if (user.id) {
         await redis.del(`user:${socket.id}`);
         await redis.del(`userIdToSocketId:${user.id}`);
-        await redis.lrem(`queue:${user.mode}`, 0, user.id);
+        await redis.lrem(`queue:${user.mode}`, 0, socket.id);
         console.log(`[DEBUG] User removed from queue: ${user.id}`);
       }
     });
@@ -177,7 +173,7 @@ app.prepare().then(() => {
       if (!redis) return;
       const user = await redis.hgetall(`user:${socket.id}`);
       if (user.id) {
-        await redis.lrem(`queue:${user.mode}`, 0, user.id);
+        await redis.lrem(`queue:${user.mode}`, 0, socket.id);
         if (user.roomId) {
           socket.to(user.roomId).emit('partner_left');
           console.log(`[DEBUG] Match cancelled: User ${user.id} disconnected from room ${user.roomId}`);

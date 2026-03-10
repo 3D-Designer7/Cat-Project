@@ -1339,13 +1339,6 @@ export default function Home() {
                     )}
 
                     <button 
-                      className="flex items-center gap-1 md:gap-2 text-red-400 hover:text-red-300 transition-colors px-2 py-1.5 md:px-3 md:py-2 rounded-lg hover:bg-red-400/10 text-xs md:text-sm font-medium"
-                    >
-                      <AlertTriangle size={16} className="md:w-[18px] md:h-[18px]" />
-                      Report
-                    </button>
-
-                    <button 
                       onClick={skipChat}
                       className="flex items-center gap-1 md:gap-2 bg-foreground text-background px-4 py-1.5 md:px-6 md:py-2 rounded-lg hover:bg-foreground/90 transition-colors font-bold text-xs md:text-sm"
                     >

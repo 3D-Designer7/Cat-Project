@@ -86,10 +86,9 @@ export default function Home() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
-  const zgRef = useRef<any>(null);
-  const localZegoStreamRef = useRef<any>(null);
-  const remoteZegoStreamRef = useRef<any>(null);
-  const publishedStreamIdRef = useRef<string | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const preGatheredIceCandidatesRef = useRef<RTCIceCandidate[]>([]);
   const roomIdRef = useRef<string | null>(null);
   const msgIdCounter = useRef(0);
 
@@ -164,7 +163,7 @@ export default function Home() {
         roomRef.current.stop();
         roomRef.current = null;
       }
-      cleanupZego();
+      cleanupWebRTC();
       setIsConnected(false);
       setIsSearching(false);
       setMode(null);
@@ -180,22 +179,23 @@ export default function Home() {
     return msgIdCounter.current.toString();
   }
 
-  function cleanupZego() {
-    const zg = zgRef.current;
-    if (zg) {
-      if (publishedStreamIdRef.current) {
-        zg.stopPublishingStream(publishedStreamIdRef.current);
-        publishedStreamIdRef.current = null;
-      }
-      if (localZegoStreamRef.current) {
-        zg.destroyStream(localZegoStreamRef.current);
-        localZegoStreamRef.current = null;
-      }
-      if (roomIdRef.current) {
-        zg.logoutRoom(roomIdRef.current);
-      }
+  function cleanupWebRTC() {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        track.stop();
+        track.enabled = false;
+      });
+      localStreamRef.current = null;
     }
-    
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.ontrack = null;
+      peerConnectionRef.current.onicecandidate = null;
+      peerConnectionRef.current.oniceconnectionstatechange = null;
+      peerConnectionRef.current.onsignalingstatechange = null;
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    preGatheredIceCandidatesRef.current = [];
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null;
       localVideoRef.current.load();
@@ -210,59 +210,238 @@ export default function Home() {
     }
     setLocalStream(null);
     setRemoteStream(null);
-    setIsMuted(false);
+    setIsMuted(false); // Reset mute state
   }
 
-  async function setupZego(roomId: string, mode: ChatMode) {
-    if (mode !== 'video' && mode !== 'voice') return;
+  const [networkStats, setNetworkStats] = useState<{
+    bitrate: number;
+    packetLoss: number;
+    rtt: number;
+  } | null>(null);
+
+  async function setupWebRTC(room: SocketRoom | null, isVideo: boolean, isInitiator: boolean) {
+    // If we already have a peer connection and we're just attaching a room
+    if (peerConnectionRef.current && room) {
+      console.log('Attaching room to existing PeerConnection');
+      
+      // Update onicecandidate to send to the room
+      peerConnectionRef.current.onicecandidate = (event) => {
+        if (event.candidate) {
+          room.sendWebRTCIceCandidate(event.candidate);
+        }
+      };
+
+      // Send any pre-gathered candidates
+      if (preGatheredIceCandidatesRef.current.length > 0) {
+        console.log(`Sending ${preGatheredIceCandidatesRef.current.length} pre-gathered ICE candidates`);
+        preGatheredIceCandidatesRef.current.forEach(candidate => {
+          room.sendWebRTCIceCandidate(candidate);
+        });
+        preGatheredIceCandidatesRef.current = [];
+      }
+      return;
+    }
 
     try {
-      const { ZegoExpressEngine } = await import('zego-express-engine-webrtc');
-      const appId = Number(process.env.NEXT_PUBLIC_ZEGOCLOUD_APP_ID);
-      const serverUrl = `wss://webliveroom${appId}-api.zego.im/ws`;
-      
-      let zg = zgRef.current;
-      if (!zg) {
-        zg = new ZegoExpressEngine(appId, serverUrl);
-        zgRef.current = zg;
-        
-        zg.on('roomStreamUpdate', async (roomID: string, updateType: string, streamList: any[]) => {
-          if (updateType === 'ADD') {
-            const stream = await zg.startPlayingStream(streamList[0].streamID);
-            remoteZegoStreamRef.current = stream;
-            setRemoteStream(stream);
-          } else if (updateType === 'DELETE') {
-            zg.stopPlayingStream(streamList[0].streamID);
-            remoteZegoStreamRef.current = null;
-            setRemoteStream(null);
-          }
+      // If we don't have a stream yet, get it
+      let stream = localStreamRef.current;
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: isVideo ? { 
+            facingMode: 'user', 
+            width: { ideal: 1920 }, 
+            height: { ideal: 1080 },
+            frameRate: { ideal: 30, max: 60 }
+          } : false,
+          audio: { 
+            echoCancellation: true, 
+            noiseSuppression: true, 
+            autoGainControl: true,
+            sampleRate: 48000,
+            channelCount: 1,
+            // @ts-ignore
+            googEchoCancellation: true,
+            // @ts-ignore
+            googAutoGainControl: true,
+            // @ts-ignore
+            googNoiseSuppression: true,
+            // @ts-ignore
+            googHighpassFilter: true,
+            // @ts-ignore
+            googTypingNoiseDetection: true,
+            // @ts-ignore
+            googAudioMirroring: false,
+          },
         });
+        localStreamRef.current = stream;
+        setLocalStream(stream);
       }
 
-      const userId = myUserIdRef.current;
-      const res = await fetch(`/api/zego/token?userId=${userId}&roomId=${roomId}`);
-      const { token } = await res.json();
-
-      const username = userRef.current?.user_metadata?.username || userRef.current?.user_metadata?.full_name || userRef.current?.email?.split('@')[0] || 'Stranger';
+      const configuration: RTCConfiguration = {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
+        ],
+        iceCandidatePoolSize: 10,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
+      };
       
-      await zg.loginRoom(roomId, token, { userID: userId, userName: username }, { userUpdate: true });
+      const pc = new RTCPeerConnection(configuration);
+      peerConnectionRef.current = pc;
 
-      const localStream = await zg.createStream({
-        camera: { video: mode === 'video', audio: true }
+      stream.getTracks().forEach(track => {
+        if (track.kind === 'video') {
+          pc.addTransceiver(track, {
+            direction: 'sendrecv',
+            streams: [stream!],
+            sendEncodings: [
+              { rid: 'low', maxBitrate: 150000, scaleResolutionDownBy: 4.0 },
+              { rid: 'mid', maxBitrate: 500000, scaleResolutionDownBy: 2.0 },
+              { rid: 'high', maxBitrate: 3000000 } // 3 Mbps for 1080p
+            ]
+          });
+        } else {
+          pc.addTrack(track, stream!);
+        }
       });
-      
-      localZegoStreamRef.current = localStream;
-      setLocalStream(localStream);
-      
-      const streamId = `${roomId}_${userId}`;
-      publishedStreamIdRef.current = streamId;
-      zg.startPublishingStream(streamId, localStream);
+
+      // Set parameters for audio track specifically
+      pc.getSenders().forEach(sender => {
+        if (sender.track?.kind === 'audio') {
+          try {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = 128000; // 128 kbps max for Opus
+            // @ts-ignore
+            params.encodings[0].networkPriority = 'high';
+            sender.setParameters(params).catch(e => console.warn('Could not set audio parameters', e));
+          } catch (e) {
+            console.warn('Could not get/set audio parameters', e);
+          }
+        }
+      });
+
+      // Prioritize Codecs (VP9 > H264 > VP8 for Video)
+      try {
+        const transceivers = pc.getTransceivers();
+        transceivers.forEach(transceiver => {
+          if (transceiver.sender.track?.kind === 'video' && 'setCodecPreferences' in transceiver) {
+            const capabilities = RTCRtpReceiver.getCapabilities('video');
+            if (capabilities && capabilities.codecs) {
+              const vp9 = capabilities.codecs.filter(c => c.mimeType.toLowerCase() === 'video/vp9');
+              const h264 = capabilities.codecs.filter(c => c.mimeType.toLowerCase() === 'video/h264');
+              const vp8 = capabilities.codecs.filter(c => c.mimeType.toLowerCase() === 'video/vp8');
+              const others = capabilities.codecs.filter(c => 
+                !['video/vp9', 'video/h264', 'video/vp8'].includes(c.mimeType.toLowerCase())
+              );
+              transceiver.setCodecPreferences([...vp9, ...h264, ...vp8, ...others]);
+            }
+          }
+        });
+      } catch (e) {
+        console.warn('Could not set codec preferences', e);
+      }
+
+      pc.ontrack = (event) => {
+        console.log('Received remote track:', event.track.kind);
+        const remoteStreamObj = event.streams[0] || new MediaStream([event.track]);
+        setRemoteStream(remoteStreamObj);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log('ICE Connection State:', pc.iceConnectionState);
+      };
+
+      pc.onsignalingstatechange = () => {
+        console.log('Signaling State:', pc.signalingState);
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          if (room) {
+            room.sendWebRTCIceCandidate(event.candidate);
+          } else {
+            preGatheredIceCandidatesRef.current.push(event.candidate);
+          }
+        }
+      };
 
     } catch (error) {
-      console.error('Error setting up ZEGOCLOUD:', error);
-      alert('Could not access camera/microphone or connect to media server. Please check permissions.');
+      console.error('Error accessing media devices.', error);
+      alert('Could not access camera/microphone. Please check permissions.');
     }
   }
+
+  useEffect(() => {
+    let statsInterval: NodeJS.Timeout;
+
+    if (isConnected && peerConnectionRef.current) {
+      let lastBytesSent = 0;
+      let lastTimestamp = 0;
+
+      statsInterval = setInterval(async () => {
+        const pc = peerConnectionRef.current;
+        if (!pc) return;
+
+        try {
+          const stats = await pc.getStats();
+          let currentBitrate = 0;
+          let currentPacketLoss = 0;
+          let currentRtt = 0;
+
+          stats.forEach(report => {
+            if (report.type === 'outbound-rtp' && report.kind === 'video') {
+              const bytes = report.bytesSent;
+              const timestamp = report.timestamp;
+              if (lastTimestamp > 0) {
+                currentBitrate = (8 * (bytes - lastBytesSent)) / (timestamp - lastTimestamp); // kbps
+              }
+              lastBytesSent = bytes;
+              lastTimestamp = timestamp;
+            }
+
+            if (report.type === 'remote-inbound-rtp') {
+              currentPacketLoss = report.fractionLost || 0;
+              currentRtt = report.roundTripTime || 0;
+            }
+          });
+
+          setNetworkStats({
+            bitrate: Math.round(currentBitrate),
+            packetLoss: Math.round(currentPacketLoss * 100),
+            rtt: Math.round(currentRtt * 1000)
+          });
+        } catch (e) {
+          console.error('Error getting stats', e);
+        }
+      }, 2000);
+    } else {
+      setNetworkStats(null);
+    }
+
+    return () => {
+      if (statsInterval) clearInterval(statsInterval);
+    };
+  }, [isConnected]);
 
   useEffect(() => {
     const handleBeforeUnload = async () => {
@@ -281,7 +460,7 @@ export default function Home() {
       window.removeEventListener('beforeunload', handleBeforeUnload);
       if (matchmakerRef.current) matchmakerRef.current.stop();
       if (roomRef.current) roomRef.current.stop();
-      cleanupZego();
+      cleanupWebRTC();
     };
   }, []);
 
@@ -290,11 +469,12 @@ export default function Home() {
   const [queueCount, setQueueCount] = useState(0);
 
   const toggleMute = () => {
-    const zg = zgRef.current;
-    if (zg && localZegoStreamRef.current && publishedStreamIdRef.current) {
-      const newMutedState = !isMuted;
-      zg.mutePublishStreamAudio(localZegoStreamRef.current, newMutedState);
-      setIsMuted(newMutedState);
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMuted(!audioTrack.enabled);
+      }
     }
   };
 
@@ -328,6 +508,11 @@ export default function Home() {
     setIsSearching(true);
     setMessages([]);
     setIsConnected(false);
+
+    // Pre-warm WebRTC immediately
+    if (selectedMode === 'video' || selectedMode === 'voice') {
+      setupWebRTC(null, selectedMode === 'video', false);
+    }
     
     const username = userRef.current?.user_metadata?.username || userRef.current?.user_metadata?.full_name || userRef.current?.email?.split('@')[0] || 'Stranger';
     
@@ -371,7 +556,75 @@ export default function Home() {
         roomIdRef.current = roomId;
         setMessages([]); // Clear previous messages
         
+        // WebRTC Timeout Logic
+        const connectionTimeout = setTimeout(() => {
+          const pc = peerConnectionRef.current;
+          if (pc && (pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') && (selectedMode === 'video' || selectedMode === 'voice')) {
+            console.log('[DEBUG] WebRTC connection timeout. Re-queuing...');
+            skipChat();
+          }
+        }, 5000);
+
         // Create room
+        let isPartnerReady = false;
+        let isSelfReady = false;
+        const iceCandidateQueue: RTCIceCandidateInit[] = [];
+
+        const processIceQueue = async (pc: RTCPeerConnection) => {
+          while (iceCandidateQueue.length > 0) {
+            const candidate = iceCandidateQueue.shift();
+            if (candidate) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                console.error('Error adding queued ice candidate', e);
+              }
+            }
+          }
+        };
+
+        const optimizeSDP = (sdp: string) => {
+          let modifiedSdp = sdp;
+          
+          // Realistic Opus settings: 64-128kbps
+          const opusRegex = /a=rtpmap:(\d+) opus\/48000\/2/i;
+          const match = modifiedSdp.match(opusRegex);
+          if (match) {
+            const pt = match[1];
+            const fmtpRegex = new RegExp(`a=fmtp:${pt} (.*)`);
+            if (fmtpRegex.test(modifiedSdp)) {
+              modifiedSdp = modifiedSdp.replace(fmtpRegex, `a=fmtp:${pt} $1;stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;maxaveragebitrate=128000`);
+            } else {
+              modifiedSdp = modifiedSdp.replace(opusRegex, `a=rtpmap:${pt} opus/48000/2\r\na=fmtp:${pt} stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;maxaveragebitrate=128000`);
+            }
+          }
+
+          // Dynamic bitrate for video (up to 3000kbps for 1080p)
+          modifiedSdp = modifiedSdp.replace(/m=video (.*)(\r\n|\n)/g, 'm=video $1$2b=AS:3000$2');
+          
+          // Realistic bitrate for audio (128kbps)
+          modifiedSdp = modifiedSdp.replace(/m=audio (.*)(\r\n|\n)/g, 'm=audio $1$2b=AS:128$2');
+
+          return modifiedSdp;
+        };
+
+        const checkAndSendOffer = async () => {
+          if (isInitiator && isPartnerReady && isSelfReady && (selectedMode === 'video' || selectedMode === 'voice')) {
+            const pc = peerConnectionRef.current;
+            if (pc) {
+              try {
+                const offer = await pc.createOffer();
+                // @ts-ignore
+                offer.sdp = optimizeSDP(offer.sdp || '');
+                await pc.setLocalDescription(offer);
+                room.sendWebRTCOffer(offer);
+              } catch (e) {
+                console.error('Error creating offer', e);
+              }
+            }
+          }
+        };
+
         const room = new SocketRoom(roomId, myUserIdRef.current, country, gender, socket, {
           onMessage: (message, imageUrl) => {
             setMessages(prev => [...prev, { id: getNextMsgId(), text: message, imageUrl, sender: 'stranger' }]);
@@ -380,12 +633,13 @@ export default function Home() {
             // Partner joined the room
           },
           onReady: () => {
-            // Partner is ready
+            isPartnerReady = true;
+            checkAndSendOffer();
           },
           onPartnerLeft: () => {
             setIsConnected(false);
             setMessages(prev => [...prev, { id: getNextMsgId(), text: `${partnerNameRef.current} has disconnected. Searching for a new partner...`, sender: 'stranger' }]);
-            cleanupZego();
+            cleanupWebRTC();
             
             if (roomRef.current) {
               roomRef.current.leave();
@@ -396,6 +650,44 @@ export default function Home() {
             setIsSearching(true);
             setPartnerName('Stranger');
           },
+          onWebRTCOffer: async (offer) => {
+            const pc = peerConnectionRef.current;
+            if (!pc) return;
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(offer));
+              await processIceQueue(pc);
+              const answer = await pc.createAnswer();
+              // @ts-ignore
+              answer.sdp = optimizeSDP(answer.sdp || '');
+              await pc.setLocalDescription(answer);
+              room.sendWebRTCAnswer(answer);
+            } catch (e) {
+              console.error('Error handling offer', e);
+            }
+          },
+          onWebRTCAnswer: async (answer) => {
+            const pc = peerConnectionRef.current;
+            if (!pc) return;
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(answer));
+              await processIceQueue(pc);
+            } catch (e) {
+              console.error('Error handling answer', e);
+            }
+          },
+          onWebRTCIceCandidate: async (candidate) => {
+            const pc = peerConnectionRef.current;
+            if (!pc) return;
+            try {
+              if (pc.remoteDescription && pc.remoteDescription.type) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } else {
+                iceCandidateQueue.push(candidate);
+              }
+            } catch (e) {
+              console.error('Error adding received ice candidate', e);
+            }
+          },
           onTyping: (isTyping) => {
             setPartnerTyping(isTyping);
           }
@@ -404,11 +696,15 @@ export default function Home() {
         roomRef.current = room;
         
         if (selectedMode === 'video' || selectedMode === 'voice') {
-          await setupZego(roomId, selectedMode);
+          await setupWebRTC(room, selectedMode === 'video', isInitiator);
         }
 
         await room.start();
+        
+        // Signal that we are ready to receive offers
+        isSelfReady = true;
         room.sendReady();
+        checkAndSendOffer();
       },
       (status, count) => {
         setSocketStatus(status);
@@ -439,7 +735,7 @@ export default function Home() {
       matchmakerRef.current.skip();
     }
     
-    cleanupZego();
+    cleanupWebRTC();
     
     // Cleanup session files
     await deleteSessionFiles();
@@ -463,7 +759,7 @@ export default function Home() {
       matchmakerRef.current.stop();
       matchmakerRef.current = null;
     }
-    cleanupZego();
+    cleanupWebRTC();
     
     // Cleanup session files
     await deleteSessionFiles();
@@ -842,6 +1138,22 @@ export default function Home() {
                             playsInline 
                             className="w-full h-full object-cover"
                           />
+                          {networkStats && (
+                            <div className="absolute top-4 left-4 bg-black/40 backdrop-blur-md rounded-lg p-2 text-[10px] font-mono text-white/80 flex flex-col gap-1 z-20 border border-white/10">
+                              <div className="flex items-center gap-2">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                <span>{networkStats.bitrate} kbps</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="opacity-50">LOSS:</span>
+                                <span>{networkStats.packetLoss}%</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="opacity-50">RTT:</span>
+                                <span>{networkStats.rtt}ms</span>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                       {mode === 'voice' && (
@@ -851,6 +1163,20 @@ export default function Home() {
                           </div>
                           <p className="text-xl font-medium text-white">Voice Call Active</p>
                           <audio ref={remoteAudioRef} autoPlay playsInline />
+                          {networkStats && (
+                            <div className="mt-4 bg-black/20 backdrop-blur-sm rounded-lg px-3 py-1.5 text-[10px] font-mono text-white/60 flex gap-4 border border-white/5">
+                              <div className="flex items-center gap-1.5">
+                                <span className="w-1 h-1 rounded-full bg-emerald-500" />
+                                <span>{networkStats.bitrate} kbps</span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span>LOSS: {networkStats.packetLoss}%</span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span>RTT: {networkStats.rtt}ms</span>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                       

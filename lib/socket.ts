@@ -131,6 +131,9 @@ export class SocketRoom {
   private onMessage: (message: string, imageUrl?: string) => void;
   private onPartnerJoined: () => void;
   private onPartnerLeft: () => void;
+  private onWebRTCOffer: (offer: any) => void;
+  private onWebRTCAnswer: (answer: any) => void;
+  private onWebRTCIceCandidate: (candidate: any) => void;
   private onTyping: (isTyping: boolean) => void;
   private onReady: () => void;
 
@@ -144,6 +147,9 @@ export class SocketRoom {
       onMessage: (message: string, imageUrl?: string) => void;
       onPartnerJoined: () => void;
       onPartnerLeft: () => void;
+      onWebRTCOffer: (offer: any) => void;
+      onWebRTCAnswer: (answer: any) => void;
+      onWebRTCIceCandidate: (candidate: any) => void;
       onTyping: (isTyping: boolean) => void;
       onReady: () => void;
     }
@@ -154,6 +160,9 @@ export class SocketRoom {
     this.onMessage = callbacks.onMessage;
     this.onPartnerJoined = callbacks.onPartnerJoined;
     this.onPartnerLeft = callbacks.onPartnerLeft;
+    this.onWebRTCOffer = callbacks.onWebRTCOffer;
+    this.onWebRTCAnswer = callbacks.onWebRTCAnswer;
+    this.onWebRTCIceCandidate = callbacks.onWebRTCIceCandidate;
     this.onTyping = callbacks.onTyping;
     this.onReady = callbacks.onReady;
 
@@ -178,7 +187,13 @@ export class SocketRoom {
 
     this.socket.on('webrtc_signal', (data: any) => {
       const { signal } = data;
-      if (signal.type === 'ready') {
+      if (signal.type === 'offer') {
+        this.onWebRTCOffer(signal);
+      } else if (signal.type === 'answer') {
+        this.onWebRTCAnswer(signal);
+      } else if (signal.candidate) {
+        this.onWebRTCIceCandidate(signal);
+      } else if (signal.type === 'ready') {
         this.onReady();
       }
     });
@@ -206,6 +221,18 @@ export class SocketRoom {
 
   async sendReady() {
     this.socket.emit('webrtc_signal', { roomId: this.roomId, signal: { type: 'ready' } });
+  }
+
+  async sendWebRTCOffer(offer: any) {
+    this.socket.emit('webrtc_signal', { roomId: this.roomId, signal: offer });
+  }
+
+  async sendWebRTCAnswer(answer: any) {
+    this.socket.emit('webrtc_signal', { roomId: this.roomId, signal: answer });
+  }
+
+  async sendWebRTCIceCandidate(candidate: any) {
+    this.socket.emit('webrtc_signal', { roomId: this.roomId, signal: candidate });
   }
 
   leave() {

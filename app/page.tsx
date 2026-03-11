@@ -528,13 +528,7 @@ export default function Home() {
       gender,
       selectedMode,
       async (roomId, partnerId, pName, pCountry, pGender, isInitiator, socket) => {
-        // Stop matchmaking
-        // We don't call matchmaker.stop() here because it would disconnect the socket
-        // instead we just clear the ref and cleanup listeners
-        if (matchmakerRef.current) {
-          matchmakerRef.current.cleanupListeners();
-        }
-        matchmakerRef.current = null;
+        // Do not cleanup matchmaker listeners here so we can reuse the socket for skipping
         
         setIsSearching(false);
         setIsConnected(true);
@@ -648,17 +642,13 @@ export default function Home() {
             cleanupWebRTC();
             
             if (roomRef.current) {
-              roomRef.current.stop();
+              roomRef.current.leave();
               roomRef.current = null;
             }
             
-            // Automatically search for a new match
+            // The server automatically places us back in the queue
             setIsSearching(true);
             setPartnerName('Stranger');
-            
-            setTimeout(() => {
-              startMatchmaking(matchedModeRef.current!);
-            }, 1000);
           },
           onWebRTCOffer: async (offer) => {
             const pc = peerConnectionRef.current;
@@ -737,13 +727,14 @@ export default function Home() {
     setIsSkipping(true);
 
     if (roomRef.current) {
-      roomRef.current.stop();
+      roomRef.current.leave();
       roomRef.current = null;
     }
+    
     if (matchmakerRef.current) {
-      matchmakerRef.current.stop();
-      matchmakerRef.current = null;
+      matchmakerRef.current.skip();
     }
+    
     cleanupWebRTC();
     
     // Cleanup session files
@@ -755,7 +746,6 @@ export default function Home() {
     setPartnerName('Stranger');
     
     setTimeout(() => {
-      startMatchmaking(matchedModeRef.current!);
       setIsSkipping(false);
     }, 500);
   };

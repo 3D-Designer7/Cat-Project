@@ -33,8 +33,8 @@ export class SocketMatchmaker {
     
     this.onStatusChange?.('connecting');
 
-    // Connect to the same host with explicit transports and URL
-    const socketUrl = typeof window !== 'undefined' ? window.location.origin : '';
+    // Connect to the production signaling server
+    const socketUrl = "https://catchat-signal.onrender.com";
     this.socket = io(socketUrl, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5,
@@ -109,6 +109,11 @@ export class SocketMatchmaker {
     this.socket.off('connect_error');
     this.socket.off('match_found');
     this.socket.off('disconnect');
+  }
+
+  skip() {
+    console.log('[DEBUG] Skipping current match');
+    this.socket.emit('skip');
   }
 
   stop() {
@@ -228,6 +233,14 @@ export class SocketRoom {
 
   async sendWebRTCIceCandidate(candidate: any) {
     this.socket.emit('webrtc_signal', { roomId: this.roomId, signal: candidate });
+  }
+
+  leave() {
+    console.log('[DEBUG] Leaving SocketRoom');
+    this.socket.off('receive_message');
+    this.socket.off('partner_typing');
+    this.socket.off('webrtc_signal');
+    this.socket.off('partner_left');
   }
 
   stop() {

@@ -13,6 +13,12 @@ const handle = app.getRequestHandler();
 
 const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
 
+if (redis) {
+  redis.on('error', (err) => {
+    console.error('[Redis] Error:', err);
+  });
+}
+
 interface User {
   id: string;
   socketId: string;
@@ -89,7 +95,9 @@ app.prepare().then(() => {
       let matched = false;
       
       while ((await redis.llen(`queue:${mode}`)) >= 2) {
+        console.log(`[DEBUG] Matchmaking loop, queue length: ${await redis.llen(`queue:${mode}`)}`);
         const partnerSocketId = await redis.lpop(`queue:${mode}`);
+        console.log(`[DEBUG] Popped partnerSocketId: ${partnerSocketId}`);
         if (!partnerSocketId || partnerSocketId === socket.id) {
           if (partnerSocketId === socket.id) await redis.rpush(`queue:${mode}`, partnerSocketId);
           continue;
@@ -113,6 +121,7 @@ app.prepare().then(() => {
           
           // Emit match_found to both
           const partnerData = await redis.hgetall(`user:${partnerSocketId}`);
+          console.log(`[DEBUG] Partner data:`, partnerData);
           socket.emit('match_found', {
             roomId,
             partnerId: partnerData.id,
@@ -123,6 +132,7 @@ app.prepare().then(() => {
           });
 
           const userData = await redis.hgetall(`user:${socket.id}`);
+          console.log(`[DEBUG] User data:`, userData);
           partnerSocket.emit('match_found', {
             roomId,
             partnerId: userData.id,

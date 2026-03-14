@@ -33,12 +33,22 @@ export class SocketMatchmaker {
     
     this.onStatusChange?.('connecting');
 
-    // Connect to the production signaling server
-    const socketUrl = "https://catchat-signal.onrender.com";
+    // Signaling server URL:
+    // - Production: Set NEXT_PUBLIC_SIGNALING_URL to your self-hosted server's public IP
+    //   e.g. http://123.45.67.89:3000
+    // - Local dev: leave NEXT_PUBLIC_SIGNALING_URL empty — falls back to same origin
+    //   (works when running combined Next.js + Socket.io via `npm run dev`)
+    const socketUrl =
+      process.env.NEXT_PUBLIC_SIGNALING_URL ||
+      (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
+
+    console.log('[DEBUG] Connecting to signaling server:', socketUrl);
+
     this.socket = io(socketUrl, {
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
       path: '/socket.io/'
     });
 
